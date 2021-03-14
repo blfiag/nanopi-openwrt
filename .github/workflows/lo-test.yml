@@ -17,6 +17,7 @@ jobs:
     env:
       DEVICE: ${{ github.event.client_payload.device || github.event.inputs.device }}
       TG: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      DEPLOY_SSHKEY: ${{ secrets.SSH_KEY }}
     if: github.event.repository.owner.id == github.event.sender.id
 
     steps:
@@ -176,3 +177,21 @@ jobs:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           args: The ${{env.DEVICE}} build ran completed at ${{job.status}}.
+
+      - name: Build and deploy packages
+        if: env.DEPLOY_SSHKEY
+        run: |
+          cd
+          truncate -s +10G lede.img
+          sudo losetup -P --direct-io $LOOP_DEVICE lede.img
+          mkdir lede && sudo mount -o nossd,compress=zstd $LOOP_DEVICE lede
+          btrfs filesystem resize max lede/
+          find package/ -type d -name luci-app-* | rev | cut -d'/' -f1 | rev | sort | xargs -n1 -i echo CONFIG_PACKAGE_{}=m >> .config
+          make defconfig
+          find package/ -type d -name luci-app-* | xargs -n1 -i sh -c "make {}/compile -j $(($(nproc) + 1)) || true"
+          make package/index
+          echo $(echo ${{env.DEPLOY_SSHKEY}} | base64 -d) > ~/.ssh/id_ed25519; chmod 600 ~/.ssh/id_ed25519
+          rsync -avz --progress -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+          bin/targets/*/*/packages/ root@imgxxx.net:/usr/share/caddy/$DEVICE/core/
+          rsync -avz --progress -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+          bin/packages/*/base root@imgxxx.net:/usr/share/caddy/$DEVICE/
